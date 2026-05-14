@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# docs
+docs/
+
+# test
+test/
+
+# npm pack 生成的安装包（勿提交）
+*.tgz
+
+# 环境与日志
+.env
+.env.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 操作系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

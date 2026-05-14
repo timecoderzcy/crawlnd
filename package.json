@@ -1,0 +1,39 @@
+{
+  "name": "crawlnd",
+  "version": "0.0.0",
+  "main": "dist/core/index.js",
+  "types": "dist/core/index.d.ts",
+  "type": "module",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  },
+  "keywords": [
+    "crawler",
+    "spider",
+    "scraping",
+    "web-scraping",
+    "middleware",
+    "pipeline",
+    "typescript",
+    "nodejs",
+    "http-client",
+    "queue"
+  ],
+  "author": "",
+  "license": "ISC",
+  "description": "Node.js TypeScript crawler runtime with staged middleware",
+  "dependencies": {
+    "jsdom": "^26.1.0",
+    "p-queue": "^8.1.1",
+    "xpath": "^0.0.34"
+  }
+}
