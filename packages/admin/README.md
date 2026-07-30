@@ -2,7 +2,7 @@
 
 Crawlnd **管理控制面插件**：Spider 注册表、Run / Schedule / Profile、鉴权、HTTP API、Job Supervisor、Worker 执行辅助。
 
-依赖 `crawlnd`、`@crawlnd/utils`；**不** import 任何业务站点。  
+依赖 `crawlnd`、`@crawlnd/utils`；通过 `registerSpider` 注入你自己的 Spider，框架不捆绑示例爬虫。  
 启动前必须 **`configureAdmin`** 注入 env 与 MySQL pool。
 
 ## 安装
@@ -12,7 +12,7 @@ npm i @crawlnd/admin crawlnd @crawlnd/utils
 npm i mysql2 ioredis hono @hono/node-server croner
 ```
 
-## 最小装配（应用仓）
+## 最小装配
 
 ```ts
 import {
@@ -309,18 +309,18 @@ const app = createAdminApp();
 | `CRAWL_CONCURRENT_REQUESTS` 等 | 默认并发 |
 | `WORKER_ID` / `WORKER_MAX_JOBS` | Worker |
 
-详见应用仓 `.env.example`。
+由你的应用自行映射环境变量后传入 `configureAdmin`。
 
 ---
 
 ## 包依赖
 
 ```
-应用仓（site + bootstrap）
+your app (registerSpider + bootstrap)
         ↓
  @crawlnd/admin
     ↓        ↓
  @crawlnd/utils → crawlnd
 ```
 
-**禁止** admin 依赖应用 `site/*`。
+框架包之间不依赖任何示例爬虫代码。

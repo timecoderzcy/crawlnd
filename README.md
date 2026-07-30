@@ -2,7 +2,7 @@
 
 Node.js TypeScript 爬虫运行时：Spider / Frontier / 请求去重，以及可选的 Admin 控制面。
 
-本仓库是 **npm workspaces monorepo**，只包含可发布的框架包（不含业务站点实现）。
+本仓库是 **npm workspaces monorepo**，只包含可发布的框架包。示例爬虫请在本地应用中自行编写，不纳入本仓库。
 
 ## Packages
 

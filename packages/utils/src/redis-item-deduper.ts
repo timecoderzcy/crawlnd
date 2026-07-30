@@ -1,7 +1,7 @@
 import type { Redis } from "ioredis";
 
 export interface RedisItemDeduperOptions<T> {
-    /** Redis SET 键，如 crawlnd:exampleSpider:items */
+    /** Redis SET 键，如 crawlnd:mySpider:items */
     setKey: string;
     /** 返回去重键；返回 null/undefined/'' 的条目会被跳过（既不入库也不标记） */
     keyOf: (item: T) => string | null | undefined;

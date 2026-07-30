@@ -1,6 +1,6 @@
 # @crawlnd/utils
 
-Crawlnd **通用工具**（与具体站点无关）：分页种子、统一日志、日志持久化、条目 Redis 去重、分布式 Job stats。
+Crawlnd **通用工具**（与具体 Spider 实现无关）：分页种子、统一日志、日志持久化、条目 Redis 去重、分布式 Job stats。
 
 依赖：`crawlnd`；部分功能需要 `ioredis` / `mysql2`。
 
@@ -148,7 +148,7 @@ import Redis from 'ioredis';
 
 const redis = new Redis();
 const deduper = createRedisItemDeduper<MyItem>(redis, {
-  setKey: 'crawlnd:mySite:items',
+  setKey: 'crawlnd:mySpider:items',
   keyOf: (item) => String(item.id), // 返回 null/'' 则跳过该条
 });
 

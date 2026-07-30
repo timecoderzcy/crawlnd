@@ -20,7 +20,7 @@
 | 字段命名 | 响应为 **camelCase** |
 | 鉴权 | 见下文「鉴权」；`401` + `{ "error": "…" }` |
 
-**分页 params（卓创 / 商务部）：**
+**分页 params 示例：**
 
 | mode | 必填字段 | 含义 |
 |------|----------|------|
@@ -358,8 +358,8 @@ export const getOverviewStats = () => http.get<PlatformOverview>('/api/stats/ove
   "items": [
     {
       "name": "exampleSpider",
-      "label": "卓创资讯",
-      "description": "卓创资讯价格搜索（JSON API）",
+      "label": "Example Spider",
+      "description": "Demo spider for docs",
       "defaultSpiderProfileId": null,
       "paramSchema": {
         "type": "object",
@@ -385,7 +385,7 @@ export const getOverviewStats = () => http.get<PlatformOverview>('/api/stats/ove
 }
 ```
 
-当前内置 Spider：`exampleSpider` | `exampleSpider` | `exampleSpider`。
+当前可用 Spider 以运行时 `GET /api/spiders` 为准（由应用 `registerSpider` 注入）。
 
 ---
 
@@ -591,7 +591,7 @@ http.get('/api/logs', { params: { spider: 'exampleSpider', level: 'error' } })
 
 ```json
 {
-  "name": "卓创原油每日",
+  "name": "daily-demo",
   "spider": "exampleSpider",
   "params": {
     "keyword": "原油",

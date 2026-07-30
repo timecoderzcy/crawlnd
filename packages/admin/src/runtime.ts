@@ -1,7 +1,7 @@
 import type { Pool } from 'mysql2/promise';
 
 /**
- * Admin 插件运行时依赖（由应用仓 configureAdmin 注入）。
+ * Admin 插件运行时依赖（由 configureAdmin 注入）。
  * 框架不直接读应用 .env / 创建连接池。
  */
 export interface AdminMysqlConfig {
@@ -58,7 +58,7 @@ export interface AdminRuntime {
 
 let runtime: AdminRuntime | null = null;
 
-/** 应用仓在 startAdmin / worker 启动前调用一次 */
+/** 在 startAdmin / worker 启动前调用一次 */
 export function configureAdmin(next: AdminRuntime): void {
     runtime = next;
 }

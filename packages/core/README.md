@@ -2,7 +2,7 @@
 
 Crawlnd **爬虫运行时**：Spider 模型、请求调度、可插拔 Frontier、请求指纹去重（`dedupe`）、robots / 域名校验。
 
-零业务站点知识；不读 `.env`、不连 MySQL。
+与具体 Spider 实现无关；不读 `.env`、不连 MySQL。
 
 ## 安装
 
