@@ -8,12 +8,26 @@ export const REQUEST_TAG_SEED = 'seed' as const;
 /** 默认：来自 sink.submit 的后续请求 */
 export const REQUEST_TAG_FOLLOW = 'follow' as const;
 
+export type CrawlRequestMethod = "GET" | "POST";
+
 export interface CrawlRequest {
     url: string;
-    method?: string;
+    method?: CrawlRequestMethod;
     headers?: Record<string, string>;
-    /** 请求体，例如 POST 的 JSON 字符串 */
-    body?: string;
+    /** 追加到 URL 的查询串（与 url 中已有 query 合并，同名键以本字段为准） */
+    query?: Record<string, string>;
+    /** 替换 url 中的路径占位：`{key}` 或 `:key`（值会经 encodeURIComponent） */
+    params?: Record<string, string>;
+    /** application/x-www-form-urlencoded 请求体；与 json、formData 同时存在时优先级最低 */
+    data?: Record<string, string>;
+    /** application/json 请求体；与 formData、data 同时存在时优先于二者 */
+    json?: JsonValue;
+    /** multipart/form-data 请求体（仅字符串字段）；与 json 同时存在时以 json 为准 */
+    formData?: Record<string, string>;
+    /** 合并为 Cookie 请求头（与 headers 里已有 Cookie 用分号拼接） */
+    cookies?: Record<string, string>;
+    /** HTTP 代理：优先读取 `url` 键，形如 `{ url: 'http://127.0.0.1:7890' }`；未配置 `url` 时取首个值为 http(s) 的项 */
+    proxy?: Record<string, string>;
     /**
      * 请求分类；未指定时首批为 seed、sink.submit 为 follow，也可 submit 时自定义
      */

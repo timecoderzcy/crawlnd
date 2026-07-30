@@ -1,6 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import type { CrawlContext, CrawlQueuedRequest, CrawlRequest, CrawlTaskSink } from './context.js';
 import { REQUEST_TAG_FOLLOW, REQUEST_TAG_SEED } from './context.js';
 import { buildShortCircuitResponse, dispatchFetch } from './dispatcher.js';
+import {
+    MemoryFrontier,
+    type DupeFilter,
+    type Frontier,
+    type FrontierItem,
+} from './frontier/index.js';
 import {
     fetchRobotsTxt,
     isUrlAllowedByRobots,
@@ -15,6 +22,7 @@ import {
     type TaggedHook,
 } from './spider.js';
 import PQueue from 'p-queue';
+import { computeRequestFingerprintHash } from './request-fingerprint.js';
 
 export type {
     CrawlContext,
@@ -29,6 +37,8 @@ export type {
     RespondInit,
 } from './context.js';
 export type { HtmlSelection } from './html-select.js';
+export { computeRequestFingerprintHash } from './request-fingerprint.js';
+export { SeedFingerprintFileStore } from './seed-fingerprint-file.js';
 export { REQUEST_TAG_SEED, REQUEST_TAG_FOLLOW } from './context.js';
 export { dispatchFetch } from './dispatcher.js';
 
@@ -42,8 +52,13 @@ export interface CrawlndOptions {
     obeyRobotsTxt?: boolean;
     /** 毫秒；大于 0 时强制串行（concurrentRequests 视为 1），且任意两次请求开始之间休眠；与动态入队可同时使用 */
     delay?: number;
-    /** 并发 worker 数；与 delay 同时配置时以 delay 为准（串行） */
+    /** 单个 Spider 内请求并发 worker 数；与 delay 同时配置时以 delay 为准（串行） */
     concurrentRequests?: number;
+    /**
+     * 同时运行的 Spider 数量；默认 1（Spider 之间串行）。
+     * 大于 1 时多个 Spider 并行调度，各自仍受 concurrentRequests / delay 约束。
+     */
+    concurrentSpiders?: number;
     /** 默认请求头 */
     defaultHeaders?: Record<string, string>;
     /**
@@ -52,6 +67,21 @@ export interface CrawlndOptions {
      * 若与 SpiderOptions.validDomains 同时为非空，则 hostname 须**同时**满足两边的至少一条规则。
      */
     validDomains?: string[];
+    /**
+     * 可插拔请求 frontier；默认 `MemoryFrontier`（进程内，行为对齐原 PQueue 调度）。
+     * 分布式时注入 Redis 等实现，并配合 `jobId` + `seedJob` / `runFetchLoop`。
+     */
+    frontier?: Frontier;
+    /**
+     * 可选引擎级去重；与 Spider.dedupe 可并存。
+     * 仅当同时配置了会在 push 时使用该过滤器的 Frontier（如带 fingerprint 的 Memory/Redis）时生效。
+     */
+    dupeFilter?: DupeFilter;
+    /**
+     * Job / 作用域 id；分布式下通常等于 runId。
+     * 未传时每个 Spider 本轮自动生成 `local:{name}:{uuid}`。
+     */
+    jobId?: string;
 }
 
 /** 工程级生命周期事件名（与 SpiderEvent 相同字符串，便于统一订阅） */
@@ -73,13 +103,21 @@ class Crawlnd {
     private appListeners: Partial<Record<CrawlndEvent, TaggedHook[]>> = {};
     /** obeyRobotsTxt 时按 origin 缓存已解析的 robots.txt */
     private robotsByOrigin = new Map<string, ParsedRobots>();
+    private readonly frontier: Frontier;
 
     constructor(options: CrawlndOptions = {}) {
         this.options = {
             ...options,
             concurrentRequests: options.concurrentRequests ?? 16,
+            concurrentSpiders: options.concurrentSpiders ?? 1,
             obeyRobotsTxt: options.obeyRobotsTxt ?? true,
         };
+        this.frontier = options.frontier ?? new MemoryFrontier();
+    }
+
+    /** 当前使用的 Frontier（便于 Worker / 测试注入后读取） */
+    getFrontier(): Frontier {
+        return this.frontier;
     }
 
     /**
@@ -139,15 +177,38 @@ class Crawlnd {
     }
 
     /**
-     * 调度 Spider：无参时跑全部已注册实例；传入 name 或 name 列表时只跑匹配 `SpiderOptions.name` 的实例（顺序与参数一致，同名多次注册会多次执行）
+     * 调度 Spider：无参时跑全部已注册实例；传入 name 或 name 列表时只跑匹配 `SpiderOptions.name` 的实例（顺序与参数一致，同名多次注册会多次执行）。
+     * 并发数由 `concurrentSpiders` 控制（默认 1 串行）；某一 Spider 失败时其余仍会跑完，最后抛出错误（多个失败则为 AggregateError）。
      */
     async crawl(): Promise<void>;
     async crawl(name: string): Promise<void>;
     async crawl(names: readonly string[]): Promise<void>;
     async crawl(names?: string | readonly string[]): Promise<void> {
         const targets = this.resolveCrawlTargets(names);
-        for (const spider of targets) {
-            await this.crawlSpider(spider);
+        if (targets.length === 0) {
+            return;
+        }
+
+        const concurrentSpiders = Math.max(1, this.options.concurrentSpiders ?? 1);
+        if (concurrentSpiders === 1 || targets.length === 1) {
+            for (const spider of targets) {
+                await this.crawlSpider(spider);
+            }
+            return;
+        }
+
+        const queue = new PQueue({ concurrency: concurrentSpiders });
+        const settled = await Promise.allSettled(
+            targets.map((spider) => queue.add(() => this.crawlSpider(spider))),
+        );
+        const errors = settled
+            .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+            .map((r) => r.reason);
+        if (errors.length === 1) {
+            throw errors[0];
+        }
+        if (errors.length > 1) {
+            throw new AggregateError(errors, `${errors.length} 个 Spider 运行失败`);
         }
     }
 
@@ -179,68 +240,187 @@ class Crawlnd {
         return result;
     }
 
-    private async crawlSpider(spider: Spider): Promise<void> {
-        await this.emitApp('open', spider);
-        await spider.emit('open');
+    /**
+     * 入队前过滤：若某条请求的 tag 命中 Spider.dedupe，且 isDone(指纹) 为真，则不入队（仅用于 resolveSeeds 结果；follow 在 dispatchOne 内再判）
+     */
+    private async filterDedupeQueue(
+        spider: Spider,
+        raw: CrawlQueuedRequest[],
+    ): Promise<CrawlQueuedRequest[]> {
+        const out: CrawlQueuedRequest[] = [];
+        for (const s of raw) {
+            const effTag = s.tag ?? REQUEST_TAG_SEED;
+            const rule = spider.getDedupeRuleForTag(effTag);
+            if (rule === undefined) {
+                out.push(s);
+                continue;
+            }
+            const { state: qs, ...reqCore } = s;
+            const merged = this.buildRequestWithDefaults(spider, reqCore);
+            const fpSrc = fingerprintSource(merged, qs);
+            const h = computeRequestFingerprintHash(fpSrc);
+            if (!(await Promise.resolve(rule.isDone(h)))) {
+                out.push(s);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 解析种子并写入 Frontier（触发 open / seeds）。
+     * 分布式：由协调进程调用；不拉取请求。
+     * @returns 实际入队种子数（去重过滤后）
+     */
+    async seedJob(spider: Spider | string, jobId: string): Promise<{ seeded: number }> {
+        const sp = typeof spider === 'string' ? this.requireSpider(spider) : spider;
+        await this.emitApp('open', sp);
+        await sp.emit('open');
+
+        const rawSeeds = await sp.resolveSeeds();
+        await sp.reloadFileDedupes();
+        const seeds = await this.filterDedupeQueue(sp, rawSeeds);
+        await this.emitApp('seeds', sp, seeds);
+        await sp.emit('seeds', seeds);
+
+        if (seeds.length === 0) {
+            return { seeded: 0 };
+        }
+
+        if (this.options.obeyRobotsTxt) {
+            const origins = [...new Set(seeds.map((s) => new URL(s.url).origin))];
+            for (const origin of origins) {
+                await this.ensureRobotsForOrigin(origin, sp);
+            }
+        }
+
+        const seedReqs: CrawlQueuedRequest[] = seeds.map((s) => ({
+            ...s,
+            tag: s.tag ?? REQUEST_TAG_SEED,
+        }));
+        const seeded = await this.frontier.push(jobId, seedReqs);
+        return { seeded };
+    }
+
+    /**
+     * 从 Frontier 拉取并执行，直到取消或队列排空（depth=0 且 inflight=0）。
+     * 分布式：多 Worker 对同一 jobId 并发调用；排空后自行退出，由 Supervisor 写终态。
+     */
+    async runFetchLoop(
+        spider: Spider | string,
+        jobId: string,
+        options: { emitLifecycle?: boolean } = {},
+    ): Promise<void> {
+        const sp = typeof spider === 'string' ? this.requireSpider(spider) : spider;
+        const emitLifecycle = options.emitLifecycle !== false;
+
+        if (emitLifecycle) {
+            await this.emitApp('open', sp);
+            await sp.emit('open');
+        }
+
+        const delayMs = Math.max(0, this.options.delay ?? 0);
+        const concurrent = delayMs > 0 ? 1 : Math.max(1, this.options.concurrentRequests ?? 16);
+        let serial = 0;
+
+        const sink: CrawlTaskSink = {
+            submit: (more: CrawlQueuedRequest | CrawlQueuedRequest[]) => {
+                const list = (Array.isArray(more) ? more : [more]).map((item) => ({
+                    ...item,
+                    tag: item.tag ?? REQUEST_TAG_FOLLOW,
+                }));
+                void this.frontier.push(jobId, list).catch((err) => {
+                    console.error(`[crawlnd] frontier.push failed (job=${jobId}):`, err);
+                });
+            },
+        };
+
+        const processItem = async (item: FrontierItem) => {
+            if (delayMs > 0) {
+                const i = ++serial;
+                if (i > 1) {
+                    await sleep(delayMs);
+                }
+            }
+            try {
+                await this.dispatchOne(sp, item.request, sink);
+                await this.frontier.ack(jobId, item.id);
+            } catch {
+                await this.frontier.nack(jobId, item.id, { requeue: false });
+            }
+        };
+
         try {
-            const seeds = await spider.resolveSeeds();
-            await this.emitApp('seeds', spider, seeds);
-            await spider.emit('seeds', seeds);
-            if (seeds.length === 0) {
+            await Promise.all(
+                Array.from({ length: concurrent }, () =>
+                    this.runFetchWorkerUntilDrain(jobId, processItem),
+                ),
+            );
+        } finally {
+            if (emitLifecycle) {
+                await sp.emit('close');
+                await this.emitApp('close', sp);
+            }
+        }
+    }
+
+    /** 发出 close 事件（seedJob 后由协调方在适当时机调用，或 Worker 用 runFetchLoop 自带 close） */
+    async emitSpiderClose(spider: Spider | string): Promise<void> {
+        const sp = typeof spider === 'string' ? this.requireSpider(spider) : spider;
+        await sp.emit('close');
+        await this.emitApp('close', sp);
+    }
+
+    private requireSpider(name: string): Spider {
+        const found = this.spiders.filter((s) => s.getName() === name);
+        if (found.length === 0) {
+            const known = this.spiders.map((s) => s.getName());
+            throw new Error(
+                `未找到名为「${name}」的 Spider。已注册的名称：${known.length > 0 ? known.join('、') : '（无）'}`,
+            );
+        }
+        return found[0]!;
+    }
+
+    private async crawlSpider(spider: Spider): Promise<void> {
+        const scopeId = this.options.jobId ?? `local:${spider.getName()}:${randomUUID()}`;
+        try {
+            const { seeded } = await this.seedJob(spider, scopeId);
+            if (seeded === 0) {
+                await this.emitSpiderClose(spider);
                 return;
             }
-
-            if (this.options.obeyRobotsTxt) {
-                const origins = [...new Set(seeds.map((s) => new URL(s.url).origin))];
-                for (const origin of origins) {
-                    await this.ensureRobotsForOrigin(origin, spider);
-                }
-            }
-
-            const delayMs = Math.max(0, this.options.delay ?? 0);
-            const concurrent = delayMs > 0 ? 1 : Math.max(1, this.options.concurrentRequests ?? 16);
-
-            const queue = new PQueue({ concurrency: concurrent });
-            let serial = 0;
-
-            const sink: CrawlTaskSink = {
-                submit(more: CrawlQueuedRequest | CrawlQueuedRequest[]) {
-                    const list = Array.isArray(more) ? more : [more];
-                    for (const item of list) {
-                        const req: CrawlQueuedRequest = {
-                            ...item,
-                            tag: item.tag ?? REQUEST_TAG_FOLLOW,
-                        };
-                        queue.add(() => runTask(req));
-                    }
-                },
-            };
-
-            const runTask = async (req: CrawlQueuedRequest) => {
-                if (delayMs > 0) {
-                    const i = ++serial;
-                    if (i > 1) {
-                        await sleep(delayMs);
-                    }
-                }
-                try {
-                    await this.dispatchOne(spider, req, sink);
-                } catch {
-                    /* 错误已在 dispatchOne 中 emit，其它队列任务继续执行 */
-                }
-            };
-
-            for (const s of seeds) {
-                const seedReq: CrawlQueuedRequest = {
-                    ...s,
-                    tag: s.tag ?? REQUEST_TAG_SEED,
-                };
-                queue.add(() => runTask(seedReq));
-            }
-            await queue.onIdle();
+            // seedJob 已发过 open；fetch 循环不再重复 open/close
+            await this.runFetchLoop(spider, scopeId, { emitLifecycle: false });
+            await this.emitSpiderClose(spider);
         } finally {
-            await spider.emit('close');
-            await this.emitApp('close', spider);
+            await this.frontier.close(scopeId).catch(() => undefined);
+        }
+    }
+
+    /**
+     * 拉取循环：直到 scope 取消，或 depth=0 且 inflight=0。
+     */
+    private async runFetchWorkerUntilDrain(
+        scopeId: string,
+        processItem: (item: FrontierItem) => Promise<void>,
+    ): Promise<void> {
+        const frontier = this.frontier;
+        for (;;) {
+            if (await frontier.isCancelled(scopeId)) {
+                return;
+            }
+            const item = await frontier.fetch(scopeId, { waitMs: 50 });
+            if (item) {
+                await processItem(item);
+                continue;
+            }
+            const [depth, inflight] = await Promise.all([
+                frontier.depth(scopeId),
+                frontier.inflight(scopeId),
+            ]);
+            if (depth === 0 && inflight === 0) {
+                return;
+            }
         }
     }
 
@@ -313,6 +493,17 @@ class Crawlnd {
     private async dispatchOne(spider: Spider, request: CrawlQueuedRequest, sink?: CrawlTaskSink): Promise<void> {
         const { state: queuedState, ...reqCore } = request;
         const mergedRequest = this.buildRequestWithDefaults(spider, reqCore);
+
+        const effTag = mergedRequest.tag ?? REQUEST_TAG_FOLLOW;
+        const dedupeRule = spider.getDedupeRuleForTag(effTag);
+        if (dedupeRule !== undefined) {
+            const fpSrc = fingerprintSource(mergedRequest, queuedState);
+            const h = computeRequestFingerprintHash(fpSrc);
+            if (await Promise.resolve(dedupeRule.isDone(h))) {
+                return;
+            }
+        }
+
         const ctx: CrawlContext = {
             request: mergedRequest,
             state: { spider, ...(queuedState ?? {}) },
@@ -333,6 +524,10 @@ class Crawlnd {
             await dispatchFetch(ctx);
             await this.emitApp('afterResponse', ctx);
             await spider.emit('afterResponse', ctx);
+            if (dedupeRule !== undefined) {
+                const fpDone = fingerprintSource(mergedRequest, queuedState);
+                await Promise.resolve(dedupeRule.markDone(computeRequestFingerprintHash(fpDone)));
+            }
         } catch (err) {
             await this.emitApp('error', err, ctx);
             await spider.emit('error', err, ctx);
@@ -342,6 +537,17 @@ class Crawlnd {
             delete ctx.respond;
         }
     }
+}
+
+/** 合并默认头后的请求 + 入队 state，供指纹计算（与 dispatchOne 一致） */
+function fingerprintSource(
+    merged: CrawlRequest,
+    queuedState: Record<string, unknown> | undefined,
+): CrawlRequest | CrawlQueuedRequest {
+    if (queuedState !== undefined && Object.keys(queuedState).length > 0) {
+        return { ...merged, state: queuedState } as CrawlQueuedRequest;
+    }
+    return merged;
 }
 
 /** 按参数顺序合并；后者覆盖前者同名键 */
@@ -386,5 +592,22 @@ function hostnameMatchesAnyDomain(hostname: string, domains: readonly string[]):
 }
 
 export { Spider } from './spider.js';
-export type { SpiderEvent, SpiderHandler, SpiderOptions } from './spider.js';
+export type { SpiderEvent, SpiderHandler, SpiderOptions, SpiderDedupeOptions, SpiderDedupeResolved } from './spider.js';
+export { safePathSegment } from './spider.js';
+export {
+    MemoryDupeFilter,
+    MemoryFrontier,
+    RedisDupeFilter,
+    RedisFrontier,
+} from './frontier/index.js';
+export type {
+    DupeFilter,
+    Frontier,
+    FrontierFetchOptions,
+    FrontierItem,
+    FrontierNackOptions,
+    MemoryFrontierOptions,
+    RedisDupeFilterOptions,
+    RedisFrontierOptions,
+} from './frontier/index.js';
 export { Crawlnd };

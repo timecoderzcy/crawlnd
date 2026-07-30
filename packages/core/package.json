@@ -1,0 +1,40 @@
+{
+  "name": "crawlnd",
+  "version": "0.1.0",
+  "description": "Crawlnd crawler runtime (Spider, Frontier, dispatch)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ioredis": "^5.11.1",
+    "jsdom": "^26.1.0",
+    "p-queue": "^8.1.1",
+    "undici": "^6.25.0",
+    "xpath": "^0.0.34"
+  },
+  "keywords": [
+    "crawler",
+    "spider",
+    "scraping",
+    "typescript"
+  ],
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  }
+}

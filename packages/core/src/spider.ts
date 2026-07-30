@@ -1,14 +1,60 @@
 import type { CrawlContext, CrawlQueuedRequest } from './context.js';
 import { REQUEST_TAG_SEED } from './context.js';
 import type { Crawlnd } from './crawlnd.js';
+import { join } from 'node:path';
+import { SeedFingerprintFileStore } from './seed-fingerprint-file.js';
+
+/**
+ * 将片段转为可作为单级目录/文件名的安全字符串（去除路径分隔符与非法字符）
+ */
+export function safePathSegment(raw: string): string {
+    const s = raw
+        .replace(/[/\\:*?"<>|\x00-\x1f]/g, '_')
+        .replace(/_+/g, '_')
+        .trim();
+    if (s === '' || s === '.' || s === '..') {
+        return '_';
+    }
+    return s;
+}
+
+/**
+ * 按 tag 的请求指纹去重配置：三选一
+ * - 非空 `stateFile`：显式 JSON 文件路径（优先级最高）
+ * - 非空 `stateDir`：自动使用 `{stateDir}/{spiderName}/{safeTag}.json`
+ * - 同时提供 `isDone` 与 `markDone`：自定义存储
+ *
+ * 语义是「见过的请求跳过」，不是业务增量同步。与 Job 级 `DupeFilter` 可并存。
+ */
+export interface SpiderDedupeOptions {
+    /** 本地 JSON 数组文件路径（元素为指纹 hex）；与 `stateDir`、手写回调三选一，且优先于 `stateDir` */
+    stateFile?: string;
+    /**
+     * 状态根目录；实际文件为 `{stateDir}/{spiderName}/{safeTag}.json`（spiderName、tag 经安全化）。
+     * 与 `stateFile` 同时存在时以 `stateFile` 为准。
+     */
+    stateDir?: string;
+    /** 与 `markDone` 成对出现；与文件类选项三选一 */
+    isDone?: (fingerprintHash: string) => boolean | Promise<boolean>;
+    /** 与 `isDone` 成对出现；与文件类选项三选一 */
+    markDone?: (fingerprintHash: string) => void | Promise<void>;
+}
+
+/** 解析后的单 tag 去重规则（供 Crawlnd 调度） */
+export type SpiderDedupeResolved = {
+    isDone: (fingerprintHash: string) => boolean | Promise<boolean>;
+    markDone: (fingerprintHash: string) => void | Promise<void>;
+    /** 持久化到本地文件时：每轮 Spider 开跑前刷新磁盘 */
+    reloadFromDisk?: () => Promise<void>;
+};
 
 export interface SpiderOptions {
     /** 必填，用于 Crawlnd.crawl(name) 筛选；是否全局唯一由调用方约定 */
     name: string;
-    /** 起始 URL，依次转为 GET 请求；与 getSeeds 同时存在时 getSeeds 优先 */
+    /** 起始 URL，依次转为 GET 请求；与 seeds 同时存在时 seeds 优先 */
     startUrls?: string[];
     /** 自定义种子请求（可异步返回） */
-    getSeeds?: () => CrawlQueuedRequest[] | Promise<CrawlQueuedRequest[]>;
+    seeds?: () => CrawlQueuedRequest[] | Promise<CrawlQueuedRequest[]>;
     /** 默认请求头 */
     defaultHeaders?: Record<string, string>;
     /**
@@ -72,12 +118,77 @@ export function hookMatchesRequestTag(event: string, tagFilter: string | undefin
 export class Spider {
     private options: SpiderOptions;
     private listeners: Partial<Record<SpiderEvent, TaggedHook[]>> = {};
+    /** 按 request.tag 匹配的去重规则（`dedupe` 注册） */
+    private dedupeByTag = new Map<string, SpiderDedupeResolved>();
 
     constructor(options: SpiderOptions) {
         if (options.name.trim() === '') {
             throw new Error('Spider 的 options.name 不能为空字符串或纯空白');
         }
         this.options = options;
+    }
+
+    /**
+     * 按 tag 配置请求指纹去重：仅当 `ctx.request.tag` 与注册 tag 一致时参与 isDone / markDone（指纹不含 tag）。
+     * 单参时 tag 固定为 `seed`；`stateFile` 优先于 `stateDir`；否则 `stateDir` 生成 `{stateDir}/{spiderName}/{safeTag}.json`；再否则须 `isDone`+`markDone`；同一 tag 不可重复注册。
+     */
+    dedupe(options: SpiderDedupeOptions): void;
+    dedupe(tag: string, options: SpiderDedupeOptions): void;
+    dedupe(a: string | SpiderDedupeOptions, b?: SpiderDedupeOptions): void {
+        const tag = b === undefined ? REQUEST_TAG_SEED : String(a).trim();
+        const opts = (b === undefined ? a : b) as SpiderDedupeOptions;
+        if (tag === '' || tag === '*') {
+            throw new Error('dedupe 的 tag 不能为空或 *');
+        }
+        if (this.dedupeByTag.has(tag)) {
+            throw new Error(`dedupe：tag「${tag}」已存在，请勿重复注册`);
+        }
+        const explicitFile = opts.stateFile?.trim();
+        if (explicitFile !== undefined && explicitFile !== '') {
+            this.registerFileStoreForTag(tag, explicitFile);
+            return;
+        }
+        const dir = opts.stateDir?.trim();
+        if (dir !== undefined && dir !== '') {
+            const resolved = join(dir, safePathSegment(this.getName()), `${safePathSegment(tag)}.json`);
+            this.registerFileStoreForTag(tag, resolved);
+            return;
+        }
+        if (opts.isDone === undefined || opts.markDone === undefined) {
+            throw new Error('dedupe：请提供 stateFile、stateDir，或同时提供 isDone 与 markDone');
+        }
+        this.dedupeByTag.set(tag, {
+            isDone: opts.isDone,
+            markDone: opts.markDone,
+        });
+    }
+
+    /** 为某 tag 注册基于文件的指纹存储 */
+    private registerFileStoreForTag(tag: string, absoluteOrRelativePath: string): void {
+        const store = new SeedFingerprintFileStore(absoluteOrRelativePath);
+        const h = store.asHandlers();
+        this.dedupeByTag.set(tag, {
+            isDone: h.isDone,
+            markDone: h.markDone,
+            reloadFromDisk: () => store.reloadFromDisk(),
+        });
+    }
+
+    /** 供 Crawlnd 解析某 tag 是否启用去重 */
+    getDedupeRuleForTag(tag: string | undefined): SpiderDedupeResolved | undefined {
+        if (tag === undefined || tag === '') {
+            return undefined;
+        }
+        return this.dedupeByTag.get(tag);
+    }
+
+    /** 所有基于本地文件的去重规则在开跑前从磁盘刷新 */
+    async reloadFileDedupes(): Promise<void> {
+        for (const rule of this.dedupeByTag.values()) {
+            if (rule.reloadFromDisk !== undefined) {
+                await rule.reloadFromDisk();
+            }
+        }
     }
 
     /**
@@ -109,14 +220,14 @@ export class Spider {
         ...args: E extends 'open'
             ? []
             : E extends 'seeds'
-              ? [CrawlQueuedRequest[]]
-              : E extends 'beforeRequest' | 'afterResponse'
-                ? [CrawlContext]
-                : E extends 'error'
-                  ? [unknown, CrawlContext]
-                  : E extends 'close'
-                    ? []
-                    : never
+            ? [CrawlQueuedRequest[]]
+            : E extends 'beforeRequest' | 'afterResponse'
+            ? [CrawlContext]
+            : E extends 'error'
+            ? [unknown, CrawlContext]
+            : E extends 'close'
+            ? []
+            : never
     ): Promise<void> {
         const list = this.listeners[event];
         if (!list?.length) {
@@ -153,13 +264,17 @@ export class Spider {
     }
 
     /**
-     * 解析本 Spider 的种子请求列表：getSeeds 优先，否则由 startUrls 生成 GET
+     * 解析本 Spider 的种子请求列表：seeds 优先，否则由 startUrls 生成 GET
      */
     async resolveSeeds(): Promise<CrawlQueuedRequest[]> {
-        if (this.options.getSeeds) {
-            return Promise.resolve(this.options.getSeeds());
+        if (this.options.seeds) {
+            return Promise.resolve(this.options.seeds());
         }
         const urls = this.options.startUrls ?? [];
         return urls.map((url) => ({ url, method: 'GET', headers: {} }));
+    }
+
+    static sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 }

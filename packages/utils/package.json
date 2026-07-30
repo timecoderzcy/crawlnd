@@ -1,0 +1,39 @@
+{
+  "name": "@crawlnd/utils",
+  "version": "0.1.0",
+  "description": "Crawlnd shared utilities (logger, page-seeds, Redis helpers)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ioredis": "^5.11.1",
+    "mysql2": "^3.23.2"
+  },
+  "peerDependencies": {
+    "crawlnd": "^0.1.0"
+  },
+  "keywords": [
+    "crawlnd",
+    "crawler",
+    "utils"
+  ],
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "@crawlnd/admin",
+  "version": "0.1.0",
+  "description": "Crawlnd admin control plane (HTTP API, runs, schedules, workers)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.12",
+    "croner": "^9.1.0",
+    "hono": "^4.12.32",
+    "ioredis": "^5.11.1",
+    "mysql2": "^3.23.2"
+  },
+  "peerDependencies": {
+    "crawlnd": "^0.1.0",
+    "@crawlnd/utils": "^0.1.0"
+  },
+  "keywords": [
+    "crawlnd",
+    "admin",
+    "crawler"
+  ],
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  }
+}
