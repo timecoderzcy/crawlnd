@@ -4,7 +4,7 @@
 > Base URL 默认：`http://127.0.0.1:8787`（`.env`：`ADMIN_HOST` / `ADMIN_PORT`）  
 > CORS：已对 `/api/*` 开放 `*`。  
 > **鉴权：** 配置了 `ADMIN_PASSWORD` 后，除白名单外均需 `Authorization: Bearer <token>`（单人密码门）。  
-> **新建任务表单（动态 schema / widget）：** [`param-schema-and-forms.md`](./param-schema-and-forms.md)
+> **新建任务表单：** 按 Spider 的 `paramSchema`（含 `x-ui-widget` / `x-ui-form`）动态渲染，不要写死字段。
 
 ---
 
@@ -348,7 +348,7 @@ export const getOverviewStats = () => http.get<PlatformOverview>('/api/stats/ove
 
 用 `paramSchema` **动态**渲染新建 Run / Schedule 表单。  
 
-**前端硬性要求：** 不要写死分页或关键词字段；必须按当前 Spider 的 `paramSchema`（含 `x-ui-widget` / `x-ui-form`）渲染。完整约定见 [`param-schema-and-forms.md`](./param-schema-and-forms.md)。
+**前端硬性要求：** 不要写死分页或关键词字段；必须按当前 Spider 的 `paramSchema`（含 `x-ui-widget` / `x-ui-form`）渲染。
 
 **响应 `200`**
 
@@ -490,7 +490,7 @@ export const getOverviewStats = () => http.get<PlatformOverview>('/api/stats/ove
 | `options` | 否 | 单次浅覆盖 App 配置 |
 | `options.concurrentRequests` | 否 | 1..32 |
 
-前端建议：App / Spider Profile 下拉 + **SchemaForm（仅跟 paramSchema）** + 可选 `options`；表单规则见 [`param-schema-and-forms.md`](./param-schema-and-forms.md)。
+前端建议：App / Spider Profile 下拉 + **SchemaForm（仅跟 paramSchema）** + 可选 `options`。
 
 **响应 `201`：** `CrawlRun`（初始多为 `pending` / `running`）  
 **响应 `400`：** spider 未知、params 非法等
@@ -756,7 +756,6 @@ export const triggerSchedule = (id: number) => http.post<CrawlRun>(`/api/schedul
 
 ## 6. 未包含（二期）
 
-> 完整路线图见 [`capabilities-and-roadmap.md`](./capabilities-and-roadmap.md)。  
 > 注：单人密码门鉴权已在一期完成，不在下列清单内。
 
 - SSE / WebSocket 实时日志  

@@ -36,6 +36,7 @@ Each package builds to `packages/*/dist` and is published from there (`prepublis
 - [packages/core/README.md](./packages/core/README.md) — runtime & Frontier
 - [packages/utils/README.md](./packages/utils/README.md)
 - [packages/admin/README.md](./packages/admin/README.md)
+- [docs/admin-api.md](./docs/admin-api.md)
 
 ## License
 
